@@ -23,7 +23,7 @@ futures = "0.3"
 ast-grep-core = "0.40"
 ast-grep-language = "0.40"
 urlencoding = "2"
-sem-core = { path = "../sem/crates/sem-core" }
+sem-core = { git = "https://github.com/Ataraxy-Labs/sem.git", branch = "feat/stdin-and-tree-sitter-upgrade" }
 
 [profile.release]
 opt-level = 3

@@ -1237,6 +1237,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "sem-core"
 version = "0.3.2"
+source = "git+https://github.com/Ataraxy-Labs/sem.git?branch=feat%2Fstdin-and-tree-sitter-upgrade#7110901478122d46a4b61c6f2c4deb88449ed9af"
 dependencies = [
  "git2",
  "rayon",
