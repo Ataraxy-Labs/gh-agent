@@ -21,7 +21,7 @@ cargo install --path .
 ## Requirements
 
 - **GitHub token**: Set `GITHUB_TOKEN` env var, or have the [GitHub CLI](https://cli.github.com/) installed and authenticated (`gh auth login`).
-- **sem** (optional): For smart semantic triage (`--smart`, `--smart-files`), install [sem](https://github.com/Ataraxy-Labs/quiver) and ensure it's on your `PATH` (or set `SEM_BIN` to its path).
+- **sem** is bundled — semantic analysis works out of the box, no separate install needed.
 
 ## Usage
 

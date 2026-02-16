@@ -1,47 +1,9 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use sem_core::git::types::{FileChange, FileStatus};
+use sem_core::model::change::{ChangeType, SemanticChange};
+use sem_core::parser::differ::{compute_semantic_diff, DiffResult};
+use sem_core::parser::plugins::create_default_registry;
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
-
-/// Resolve the sem binary: respect `SEM_BIN` env var, otherwise look for `sem` on PATH.
-fn sem_bin() -> String {
-    std::env::var("SEM_BIN").unwrap_or_else(|_| "sem".to_string())
-}
-
-#[derive(Debug, Deserialize)]
-struct SemOutput {
-    summary: Option<SemSummary>,
-    changes: Option<Vec<SemChange>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SemSummary {
-    #[serde(default)]
-    added: u64,
-    #[serde(default)]
-    modified: u64,
-    #[serde(default)]
-    deleted: u64,
-    #[serde(default)]
-    renamed: u64,
-    #[serde(default)]
-    moved: u64,
-    #[serde(default)]
-    file_count: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SemChange {
-    change_type: String,
-    entity_type: String,
-    entity_name: String,
-    file_path: String,
-    old_file_path: Option<String>,
-    before_content: Option<String>,
-    after_content: Option<String>,
-}
 
 // --- Smart analysis types ---
 
@@ -65,140 +27,120 @@ struct CategorizedChange {
     value_change: Option<(String, String)>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SemFileInput {
-    file_path: String,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    old_file_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    before_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    after_content: Option<String>,
+/// Run sem-core directly on pre-fetched file pairs (no git/CLI needed).
+fn run_sem_core(file_pairs: &[(String, String, Option<String>, Option<String>)]) -> DiffResult {
+    let file_changes: Vec<FileChange> = file_pairs
+        .iter()
+        .map(|(filename, status, before, after)| {
+            let file_status = match status.as_str() {
+                "added" => FileStatus::Added,
+                "removed" => FileStatus::Deleted,
+                "renamed" => FileStatus::Renamed,
+                _ => FileStatus::Modified,
+            };
+            FileChange {
+                file_path: filename.clone(),
+                status: file_status,
+                old_file_path: None,
+                before_content: before.clone(),
+                after_content: after.clone(),
+            }
+        })
+        .collect();
+
+    let registry = create_default_registry();
+    compute_semantic_diff(&file_changes, &registry, None, None)
 }
 
-/// Find the merge base between two refs
-fn git_merge_base(base_ref: &str, head_ref: &str) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(["merge-base", base_ref, head_ref])
-        .output()
-        .map_err(|e| format!("Failed to run git merge-base: {e}"))?;
+/// Run sem-core on git refs (requires local git repo + refs fetched).
+fn run_sem_core_git(base_ref: &str, head_ref: &str) -> Result<DiffResult> {
+    use sem_core::git::bridge::GitBridge;
+    use sem_core::git::types::DiffScope;
+    use std::path::Path;
 
-    if !output.status.success() {
-        return Err(format!(
-            "Cannot find merge base between {base_ref} and {head_ref}. Try `git fetch origin {base_ref} {head_ref}` first."
-        ));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Check if we're in a git repo and refs exist
-fn check_git_refs(base_ref: &str, head_ref: &str) -> Result<(), String> {
-    let git_check = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output();
-
-    match git_check {
-        Ok(out) if out.status.success() => {}
-        _ => return Err("Cannot run semantic analysis: not inside a git repository.".to_string()),
-    }
-
-    for r in [base_ref, head_ref] {
-        let check = Command::new("git")
-            .args(["rev-parse", "--verify", r])
-            .output();
-        match check {
-            Ok(out) if out.status.success() => {}
-            _ => return Err(format!(
-                "Cannot run semantic analysis: ref {r} not available locally. Try `git fetch origin` first."
-            )),
-        }
-    }
-
-    Ok(())
-}
-
-pub fn run_sem(base_ref: &str, head_ref: &str) -> Result<String> {
     let origin_base = format!("origin/{base_ref}");
     let origin_head = format!("origin/{head_ref}");
 
-    if let Err(msg) = check_git_refs(&origin_base, &origin_head) {
-        return Ok(msg);
-    }
+    let cwd = std::env::current_dir()?;
+    let _git = GitBridge::open(Path::new(&cwd))
+        .map_err(|e| anyhow::anyhow!("Not in a git repo: {e}"))?;
 
-    // Use merge-base to scope to only PR changes
-    let merge_base = match git_merge_base(&origin_base, &origin_head) {
-        Ok(mb) => mb,
-        Err(msg) => return Ok(msg),
+    // Use git CLI for merge-base since GitBridge doesn't expose the repo
+    let mb_output = std::process::Command::new("git")
+        .args(["merge-base", &origin_base, &origin_head])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run git merge-base: {e}"))?;
+    if !mb_output.status.success() {
+        anyhow::bail!(
+            "Cannot find merge base between {} and {}. Try `git fetch origin` first.",
+            origin_base, origin_head
+        );
+    }
+    let merge_base = String::from_utf8_lossy(&mb_output.stdout).trim().to_string();
+
+    let scope = DiffScope::Range {
+        from: merge_base,
+        to: origin_head,
     };
 
-    let output = Command::new(sem_bin())
-        .arg("diff")
-        .arg("--from")
-        .arg(&merge_base)
-        .arg("--to")
-        .arg(&origin_head)
-        .arg("--format")
-        .arg("json")
-        .output()?;
+    let git = GitBridge::open(Path::new(&cwd))
+        .map_err(|e| anyhow::anyhow!("Not in a git repo: {e}"))?;
+    let file_changes = git.get_changed_files(&scope)
+        .map_err(|e| anyhow::anyhow!("Failed to get changed files: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(format!("Semantic analysis failed: {}", stderr.trim()));
-    }
+    let registry = create_default_registry();
+    Ok(compute_semantic_diff(&file_changes, &registry, None, None))
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: SemOutput = match serde_json::from_str(&stdout) {
-        Ok(v) => v,
-        Err(e) => return Ok(format!("Failed to parse sem output: {e}")),
-    };
+// --- Formatting ---
 
+fn format_diff_result(result: &DiffResult) -> String {
     let mut lines = Vec::new();
 
-    if let Some(s) = &parsed.summary {
-        let mut parts = Vec::new();
-        if s.added > 0 { parts.push(format!("{} added", s.added)); }
-        if s.modified > 0 { parts.push(format!("{} modified", s.modified)); }
-        if s.deleted > 0 { parts.push(format!("{} deleted", s.deleted)); }
-        if s.renamed > 0 { parts.push(format!("{} renamed", s.renamed)); }
-        if s.moved > 0 { parts.push(format!("{} moved", s.moved)); }
-        lines.push(format!(
-            "Semantic: {} across {} files",
-            parts.join(", "),
-            s.file_count,
-        ));
-        lines.push(String::new());
-    }
+    let mut parts = Vec::new();
+    if result.added_count > 0 { parts.push(format!("{} added", result.added_count)); }
+    if result.modified_count > 0 { parts.push(format!("{} modified", result.modified_count)); }
+    if result.deleted_count > 0 { parts.push(format!("{} deleted", result.deleted_count)); }
+    if result.renamed_count > 0 { parts.push(format!("{} renamed", result.renamed_count)); }
+    if result.moved_count > 0 { parts.push(format!("{} moved", result.moved_count)); }
+    lines.push(format!(
+        "Semantic: {} across {} files",
+        parts.join(", "),
+        result.file_count,
+    ));
+    lines.push(String::new());
 
-    if let Some(changes) = &parsed.changes {
-        for c in changes {
-            let icon = match c.change_type.as_str() {
-                "added" => "⊕",
-                "modified" => "∆",
-                "renamed" => "↻",
-                "deleted" => "⊖",
-                "moved" => "→",
-                _ => "?",
-            };
-            let name = if c.change_type == "moved" || c.change_type == "renamed" {
-                if let Some(old_path) = &c.old_file_path {
-                    format!("{} (from {})", c.entity_name, old_path)
-                } else {
-                    c.entity_name.clone()
-                }
+    for c in &result.changes {
+        let icon = match c.change_type {
+            ChangeType::Added => "⊕",
+            ChangeType::Modified => "∆",
+            ChangeType::Renamed => "↻",
+            ChangeType::Deleted => "⊖",
+            ChangeType::Moved => "→",
+        };
+        let name = if matches!(c.change_type, ChangeType::Moved | ChangeType::Renamed) {
+            if let Some(old_path) = &c.old_file_path {
+                format!("{} (from {})", c.entity_name, old_path)
             } else {
                 c.entity_name.clone()
-            };
-            lines.push(format!(
-                "  {} {:<12} {:<35} {}",
-                icon, c.entity_type, name, c.file_path
-            ));
-        }
+            }
+        } else {
+            c.entity_name.clone()
+        };
+        lines.push(format!(
+            "  {} {:<12} {:<35} {}",
+            icon, c.entity_type, name, c.file_path
+        ));
     }
 
-    Ok(lines.join("\n"))
+    lines.join("\n")
+}
+
+pub fn run_sem(base_ref: &str, head_ref: &str) -> Result<String> {
+    match run_sem_core_git(base_ref, head_ref) {
+        Ok(result) => Ok(format_diff_result(&result)),
+        Err(e) => Ok(e.to_string()),
+    }
 }
 
 // --- Smart semantic analysis ---
@@ -256,14 +198,13 @@ fn extract_value_change(before: &str, after: &str) -> Option<(String, String)> {
     }
 }
 
-fn categorize_change(c: &SemChange) -> CategorizedChange {
+fn categorize_change(c: &SemanticChange) -> CategorizedChange {
+    let ct_str = c.change_type.to_string();
+
     let (category, similarity, removed_tokens, added_tokens, value_change) =
         match (&c.before_content, &c.after_content) {
-            // New entity — no before
             (None, Some(_)) => (ChangeCategory::NewLogic, 0.0, vec![], vec![], None),
-            // Deleted entity — no after
             (Some(_), None) => (ChangeCategory::Mechanical, 1.0, vec![], vec![], None),
-            // Both present — compare
             (Some(before), Some(after)) => {
                 let sim = jaccard_similarity(before, after);
                 let (removed, added) = token_diff(before, after);
@@ -280,13 +221,12 @@ fn categorize_change(c: &SemChange) -> CategorizedChange {
                 };
                 (cat, sim, removed, added, vc)
             }
-            // Neither — shouldn't happen, treat as mechanical
             (None, None) => (ChangeCategory::Mechanical, 1.0, vec![], vec![], None),
         };
 
     CategorizedChange {
         category,
-        change_type: c.change_type.clone(),
+        change_type: ct_str,
         entity_type: c.entity_type.clone(),
         entity_name: c.entity_name.clone(),
         file_path: c.file_path.clone(),
@@ -297,7 +237,6 @@ fn categorize_change(c: &SemChange) -> CategorizedChange {
     }
 }
 
-/// Detect common patterns: tokens removed/added across multiple entities
 fn detect_patterns(changes: &[CategorizedChange]) -> Vec<(String, Vec<usize>)> {
     let mut token_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -324,43 +263,7 @@ fn short_path(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// Run sem diff via stdin with pre-fetched file contents
-fn run_sem_stdin(file_inputs: &[SemFileInput]) -> Result<SemOutput> {
-    let json_input = serde_json::to_string(file_inputs)?;
-
-    let mut child = Command::new(sem_bin())
-        .arg("diff")
-        .arg("--stdin")
-        .arg("--format")
-        .arg("json")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(json_input.as_bytes())?;
-    }
-
-    let output = child.wait_with_output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("sem stdin failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: SemOutput = serde_json::from_str(&stdout)?;
-    Ok(parsed)
-}
-
-fn format_smart_output(parsed: &SemOutput) -> String {
-    let changes = match &parsed.changes {
-        Some(c) => c,
-        None => return "No semantic changes found.".to_string(),
-    };
-
+fn format_smart_output(changes: &[SemanticChange], file_count: usize) -> String {
     let categorized: Vec<CategorizedChange> = changes.iter().map(categorize_change).collect();
     let patterns = detect_patterns(&categorized);
 
@@ -371,12 +274,12 @@ fn format_smart_output(parsed: &SemOutput) -> String {
         for &idx in indices {
             grouped_indices.insert(idx);
         }
-        let file_count = indices.len();
+        let fc = indices.len();
         let files: Vec<&str> = indices.iter().map(|&i| short_path(&categorized[i].file_path)).collect();
         let file_list = if files.len() <= 3 {
             files.join(", ")
         } else {
-            format!("{} files", file_count)
+            format!("{} files", fc)
         };
         mechanical_lines.push(format!("  ⊖ {} removed from {}", token, file_list));
     }
@@ -418,13 +321,9 @@ fn format_smart_output(parsed: &SemOutput) -> String {
     let mut new_logic_lines: Vec<String> = Vec::new();
     for c in &categorized {
         if c.category != ChangeCategory::NewLogic { continue; }
-        let icon = match c.change_type.as_str() {
-            "added" => "⊕",
-            _ => "⊕",
-        };
         new_logic_lines.push(format!(
-            "  {} {:<20} {} — {}",
-            icon, short_path(&c.file_path), c.entity_name, c.entity_type,
+            "  ⊕ {:<20} {} — {}",
+            short_path(&c.file_path), c.entity_name, c.entity_type,
         ));
     }
 
@@ -455,12 +354,10 @@ fn format_smart_output(parsed: &SemOutput) -> String {
 
     let mut out = Vec::new();
 
-    if let Some(s) = &parsed.summary {
-        out.push(format!(
-            "Smart Review: {} changes across {} files\n",
-            changes.len(), s.file_count,
-        ));
-    }
+    out.push(format!(
+        "Smart Review: {} changes across {} files\n",
+        changes.len(), file_count,
+    ));
 
     if !mechanical_lines.is_empty() {
         out.push(format!(
@@ -496,64 +393,25 @@ fn format_smart_output(parsed: &SemOutput) -> String {
 pub fn run_sem_smart_from_pairs(
     file_pairs: &[(String, String, Option<String>, Option<String>)],
 ) -> Result<String> {
-    let file_inputs: Vec<SemFileInput> = file_pairs
-        .iter()
-        .map(|(filename, status, before, after)| {
-            let sem_status = match status.as_str() {
-                "added" => "added",
-                "removed" => "deleted",
-                "renamed" => "renamed",
-                _ => "modified",
-            };
-            SemFileInput {
-                file_path: filename.clone(),
-                status: sem_status.to_string(),
-                old_file_path: None,
-                before_content: before.clone(),
-                after_content: after.clone(),
-            }
-        })
-        .collect();
-
-    if file_inputs.is_empty() {
+    if file_pairs.is_empty() {
         return Ok("No files to analyze.".to_string());
     }
 
-    let parsed = match run_sem_stdin(&file_inputs) {
-        Ok(p) => p,
-        Err(e) => return Ok(format!("Smart analysis failed: {e}")),
-    };
+    let result = run_sem_core(file_pairs);
 
-    Ok(format_smart_output(&parsed))
+    if result.changes.is_empty() {
+        return Ok("No semantic changes found.".to_string());
+    }
+
+    Ok(format_smart_output(&result.changes, result.file_count))
 }
 
 /// Returns deduplicated file paths for non-mechanical changes from pre-fetched pairs.
-/// Returns None if sem fails (caller should fall back to all files).
 pub fn get_smart_files_from_pairs(
     file_pairs: &[(String, String, Option<String>, Option<String>)],
 ) -> Option<Vec<String>> {
-    let file_inputs: Vec<SemFileInput> = file_pairs
-        .iter()
-        .map(|(filename, status, before, after)| {
-            let sem_status = match status.as_str() {
-                "added" => "added",
-                "removed" => "deleted",
-                "renamed" => "renamed",
-                _ => "modified",
-            };
-            SemFileInput {
-                file_path: filename.clone(),
-                status: sem_status.to_string(),
-                old_file_path: None,
-                before_content: before.clone(),
-                after_content: after.clone(),
-            }
-        })
-        .collect();
-
-    let parsed = run_sem_stdin(&file_inputs).ok()?;
-    let changes = parsed.changes.as_ref()?;
-    let categorized: Vec<CategorizedChange> = changes.iter().map(categorize_change).collect();
+    let result = run_sem_core(file_pairs);
+    let categorized: Vec<CategorizedChange> = result.changes.iter().map(categorize_change).collect();
 
     let mut files: Vec<String> = categorized
         .iter()
