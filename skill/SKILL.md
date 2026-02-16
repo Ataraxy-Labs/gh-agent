@@ -25,7 +25,31 @@ Categorizes changes into MECHANICAL (skip), NEW LOGIC (read), BEHAVIORAL (verify
 
 Gets diffs for non-mechanical files only. Lock/generated/minified files excluded by default.
 
-**3. Context** — when diffs aren't enough:
+**3. Impact analysis** — after reading diffs, search for breakage outside the PR:
+
+Identify removed/renamed exports, changed signatures, deleted types, or modified public APIs from the diff. Then search `--repo-wide` for each:
+
+```bash
+# Find callers of a removed/renamed symbol
+gh-agent pr grep --repo OWNER/REPO N --pattern "removedFunction" --repo-wide
+
+# Find references to a deleted type or enum variant
+gh-agent pr grep --repo OWNER/REPO N --pattern "DeletedTypeName" --repo-wide
+
+# Find consumers of a changed interface/config
+gh-agent pr grep --repo OWNER/REPO N --pattern "changedOption" --repo-wide --path src/
+
+# Structural search for removed prop usage
+gh-agent pr ast-grep --repo OWNER/REPO N --pattern 'oldPropName={$$$}' --repo-wide
+```
+
+Search for:
+- **Deleted exports/types** — still imported elsewhere?
+- **Removed function parameters** — callers updated?
+- **Changed constants/config** — validators, serializers, tests in sync?
+- **Removed attributes/flags** — renderers, parsers, importers still reference them?
+
+**4. Context** — when diffs or impact results need more detail:
 
 ```bash
 # Read full file at PR branch
@@ -34,17 +58,19 @@ gh-agent pr file --repo OWNER/REPO N --path PATH
 # Search PR changed files (fast, default)
 gh-agent pr grep --repo OWNER/REPO N --pattern "functionName"
 gh-agent pr ast-grep --repo OWNER/REPO N --pattern 'useCallback($$$)'
-
-# Search full codebase (only if PR files aren't enough)
-gh-agent pr grep --repo OWNER/REPO N --pattern "MyType" --repo-wide
-gh-agent pr ast-grep --repo OWNER/REPO N --pattern '$T($$$)' --repo-wide --path src/
 ```
 
 `--repo-wide` uses GitHub Code Search + always includes PR files at head ref. PR results win on overlap. `--base` searches the base branch instead.
 
-**4. Review** → hand off to `code-review` skill with collected context.
+**5. Review** — you are an expert senior engineer with deep knowledge of software engineering best practices, security, performance, and maintainability. Perform a thorough code review of the collected diffs and impact results:
 
-**5. Post** (only when user asks):
+1. Generate a high-level summary of the changes in the diff.
+2. Go file-by-file and review each changed hunk.
+3. Comment on what changed in that hunk (including the line range) and how it relates to other changed hunks and code, reading any other relevant files. Also call out bugs, hackiness, unnecessary code, or too much shared mutable state.
+4. Flag any `--repo-wide` hits from impact analysis that indicate broken callers, stale references, or missing updates outside the PR.
+5. Categorize findings by severity: CRITICAL, HIGH, MEDIUM, LOW.
+
+**6. Post** (only when user asks):
 
 ```bash
 # Post comments (line must appear in diff — use --json to check)
@@ -79,5 +105,7 @@ gh-agent pr suggest --repo OWNER/REPO N --file F --line-start S --line-end E --r
 2. **`--smart-files` for diffs**. One call, no manual file list.
 3. **Skip MECHANICAL**. Don't read or comment on them.
 4. **NEVER use local files**. Always use `pr file`, `pr grep`, or `pr ast-grep`.
-5. **Search incrementally**. PR files first → `--repo-wide` only if needed.
-6. **Post only when asked**. Present findings in chat; user decides when to post.
+5. **Always do impact analysis**. After reading diffs, `--repo-wide` grep for every deleted/renamed export, removed type, and changed public API. This catches broken callers outside the PR.
+6. **Search incrementally**. PR files first → `--repo-wide` only if needed for additional context.
+7. **Review in-skill**. Do not hand off to external review tools. Summarize, go hunk-by-hunk, flag bugs and stale references, and categorize by severity.
+8. **Post only when asked**. Present findings in chat; user decides when to post.
