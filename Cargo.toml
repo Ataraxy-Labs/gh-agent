@@ -1,0 +1,29 @@
+[package]
+name = "gh-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-friendly GitHub CLI for PR reviews"
+license = "MIT"
+repository = "https://github.com/Ataraxy-Labs/gh-agent"
+homepage = "https://github.com/Ataraxy-Labs/gh-agent"
+
+[[bin]]
+name = "gh-agent"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+base64 = "0.22"
+futures = "0.3"
+ast-grep-core = "0.40"
+ast-grep-language = "0.40"
+urlencoding = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
