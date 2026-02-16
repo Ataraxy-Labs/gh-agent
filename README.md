@@ -102,7 +102,13 @@ Review JSON format:
 
 ## Agent skill
 
-This repo includes an agent skill for AI coding agents at [`skill/SKILL.md`](skill/SKILL.md). To use it, install the skill in your agent's skill directory — it teaches the agent the full gh-agent workflow for PR reviews.
+This repo includes an agent skill that teaches AI coding agents the full gh-agent PR review workflow.
+
+```bash
+npx skills add ataraxy-labs/gh-agent
+```
+
+Or browse it at [skills.sh/ataraxy-labs/gh-agent](https://skills.sh/ataraxy-labs/gh-agent).
 
 ## License
 

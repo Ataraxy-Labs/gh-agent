@@ -1,11 +1,19 @@
 ---
 name: reviewing-prs
-description: "Collects PR context using gh-agent CLI with smart semantic triage. Use when asked to review a PR, check a pull request, look at PR changes, or given a PR number/URL to review. Pairs with code-review skill for the actual review."
+description: "Agent-powered GitHub PR reviews with smart semantic triage. Categorizes changes as MECHANICAL (skip), NEW LOGIC (read), or BEHAVIORAL (verify) — so agents never waste tokens reading lock files or formatting diffs. Includes remote file reading, text/AST search across PR or full repo, and comment posting. No local clone needed. Use when asked to review a PR, check a pull request, look at PR changes, or given a PR number/URL to review."
 ---
 
 # PR Review with gh-agent
 
 Works from any directory — everything is fetched from GitHub API.
+
+## Install gh-agent
+
+```bash
+brew install ataraxy-labs/tap/gh-agent
+```
+
+Requires `GITHUB_TOKEN` env var or [GitHub CLI](https://cli.github.com/) authenticated via `gh auth login`.
 
 ## Workflow
 
