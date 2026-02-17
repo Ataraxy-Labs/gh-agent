@@ -31,7 +31,21 @@ jobs:
         id: sha
         run: |
           TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz"
-          SHA256=$(curl -sL "$TARBALL_URL" | sha256sum | awk '{print $1}')
+
+          # Wait for GitHub to finalize the tarball (it can change right after release creation)
+          echo "Waiting for tarball to stabilize..."
+          PREV_SHA=""
+          for i in 1 2 3 4 5; do
+            SHA256=$(curl -sL "$TARBALL_URL" | sha256sum | awk '{print $1}')
+            echo "Attempt $i: $SHA256"
+            if [ "$SHA256" = "$PREV_SHA" ]; then
+              echo "Tarball SHA256 stabilized."
+              break
+            fi
+            PREV_SHA="$SHA256"
+            sleep 10
+          done
+
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
           echo "Tarball: $TARBALL_URL"
           echo "SHA256: $SHA256"
